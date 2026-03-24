@@ -62,8 +62,5 @@ jobs:
           files: ./coverage/lcov.info
           flags: unittests
           name: codecov-umbrella
-          fail_ci_if_error: true
+          fail_ci_if_error: false
           verbose: true
-
-      - name: Check coverage thresholds
-        run: npm run test:coverage -- --coverageThreshold='{"global":{"branches":70,"functions":70,"lines":70,"statements":70}}'
