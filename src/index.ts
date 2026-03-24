@@ -3,15 +3,16 @@ import cors from "cors";
 import helmet from "helmet";
 import rateLimit from "express-rate-limit";
 import dotenv from "dotenv";
-import os from "os";
-import fs from "fs";
-import path from "path";
 
 import { transactionRoutes } from "./routes/transactions";
 import { bulkRoutes } from "./routes/bulk";
-import { transactionDisputeRoutes, disputeRoutes } from "./routes/disputes";
+import {
+  transactionDisputeRoutes,
+  disputeRoutes,
+} from "./routes/disputes";
 import { errorHandler } from "./middleware/errorHandler";
-import { connectRedis } from "./config/redis";
+import { connectRedis, redisClient } from "./config/redis";
+import { pool } from "./config/database";
 import {
   globalTimeout,
   haltOnTimedout,
@@ -24,103 +25,90 @@ import {
   resumeQueueEndpoint,
 } from "./queue";
 
+import { register } from "./utils/metrics";
+import { metricsMiddleware } from "./middleware/metrics";
+
 dotenv.config();
 
 const app = express();
 const PORT = process.env.PORT || 3000;
 
+// Rate limiter
 const limiter = rateLimit({
   windowMs: 15 * 60 * 1000,
   max: 100,
 });
 
-// Security and parsing middleware
+// Middleware
+app.use(metricsMiddleware); // Register metrics middleware early
 app.use(helmet());
 app.use(cors());
 app.use(express.json());
 app.use(limiter);
 
-// Global timeout configuration
-app.use(globalTimeout);
-app.use(haltOnTimedout);
+// Prometheus metrics endpoint
+app.get("/metrics", async (req, res) => {
+  try {
+    res.set("Content-Type", register.contentType);
+    res.end(await register.metrics());
+  } catch (err) {
+    res.status(500).end(err);
+  }
+});
 
+// Basic health check
 app.get("/health", (req, res) => {
   res.json({ status: "ok", timestamp: new Date().toISOString() });
 });
 
-// cache to ensure <100ms response
-let cachedHealth: any = null;
-let lastCheckTime = 0;
-const CACHE_TTL = 5000; // 5 seconds
+/**
+ * Readiness probe (DB + Redis)
+ */
+app.get("/ready", async (req, res) => {
+  const checks: Record<string, string> = {
+    database: "down",
+    redis: "down",
+  };
 
-async function checkRedis(): Promise<boolean> {
+  let allReady = true;
+
   try {
-    // If connectRedis exposes client, use ping here instead
-    // Placeholder: assume connection success if no error thrown earlier
-    return true;
-  } catch {
-    return false;
+    await pool.query("SELECT 1");
+    checks.database = "ok";
+  } catch (err) {
+    console.error("Database check failed", err);
+    checks.database = "error";
+    allReady = false;
   }
-}
 
-function checkMemory(): boolean {
-  const total = os.totalmem();
-  const free = os.freemem();
-  const usage = (total - free) / total;
-
-  return usage < 0.9; // unhealthy if >90% used
-}
-
-function checkDisk(): boolean {
   try {
-    const diskPath = path.resolve("/");
-    fs.accessSync(diskPath, fs.constants.W_OK);
-    return true;
-  } catch {
-    return false;
+    if (redisClient?.isOpen) {
+      await redisClient.ping();
+      checks.redis = "ok";
+    } else {
+      checks.redis = "closed";
+      allReady = false;
+    }
+  } catch (err) {
+    console.error("Redis check failed", err);
+    checks.redis = "error";
+    allReady = false;
   }
-}
-
-app.get("/health/lb", async (req, res) => {
-  const now = Date.now();
-
-  // Return cached result if within TTL
-  if (cachedHealth && now - lastCheckTime < CACHE_TTL) {
-    return res.status(cachedHealth.statusCode).json(cachedHealth.data);
-  }
-
-  const start = Date.now();
-
-  const [redisOk] = await Promise.all([checkRedis()]);
-
-  const memoryOk = checkMemory();
-  const diskOk = checkDisk();
-
-  const isHealthy = redisOk && memoryOk && diskOk;
 
   const response = {
-    status: isHealthy ? "healthy" : "unhealthy",
+    status: allReady ? "ready" : "not ready",
+    checks,
     timestamp: new Date().toISOString(),
-    responseTimeMs: Date.now() - start,
-    checks: {
-      redis: redisOk ? "up" : "down",
-      memory: memoryOk ? "ok" : "high",
-      disk: diskOk ? "ok" : "unavailable",
-    },
   };
 
-  const statusCode = isHealthy ? 200 : 503;
-
-  // Cache result
-  cachedHealth = {
-    statusCode,
-    data: response,
-  };
-  lastCheckTime = now;
-
-  res.status(statusCode).json(response);
+  res.status(allReady ? 200 : 503).json(response);
 });
 
+// Timeout middleware
+app.use(globalTimeout);
+app.use(haltOnTimedout);
+
+// Routes
 app.use("/api/transactions", transactionRoutes);
 app.use("/api/transactions", transactionDisputeRoutes);
 app.use("/api/transactions/bulk", bulkRoutes);
@@ -135,7 +123,7 @@ app.post("/admin/queues/resume", resumeQueueEndpoint);
 app.use(timeoutErrorHandler);
 app.use(errorHandler);
 
-// Initialize Redis connection
+// Init Redis
 connectRedis()
   .then(() => {
     console.log("Redis initialized");
