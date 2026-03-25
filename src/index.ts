@@ -184,11 +184,3 @@ if (process.env.NODE_ENV !== 'test') {
 
 // Export the app instance for Supertest integration tests
 export default app;
-app.listen(PORT, () => {
-  console.log(`Server running on port ${PORT}`);
-  console.log(
-    `Rate limit: ${RATE_LIMIT_MAX_REQUESTS} requests per ${RATE_LIMIT_WINDOW_MS / 1000}s`,
-  );
-});
-
-export default app;
