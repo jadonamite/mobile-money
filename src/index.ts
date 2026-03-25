@@ -10,11 +10,7 @@ import { transactionDisputeRoutes, disputeRoutes } from "./routes/disputes";
 import { errorHandler } from "./middleware/errorHandler";
 import { connectRedis, redisClient } from "./config/redis";
 import { pool } from "./config/database";
-import {
-  globalTimeout,
-  haltOnTimedout,
-  timeoutErrorHandler,
-} from "./middleware/timeout";
+import { globalTimeout, haltOnTimedout, timeoutErrorHandler } from "./middleware/timeout";
 import { responseTime } from "./middleware/responseTime";
 import {
   createQueueDashboard,
@@ -44,22 +40,15 @@ const limiter = rateLimit({
 });
 
 // Middleware
-app.use(metricsMiddleware); // Register metrics middleware early
+app.use(metricsMiddleware);
 app.use(helmet());
 app.use(cors());
 app.use(express.json());
 app.use(limiter);
 app.use(responseTime);
 
-// Prometheus metrics endpoint
-app.get("/metrics", async (req, res) => {
-  try {
-    res.set("Content-Type", register.contentType);
-    res.end(await register.metrics());
-  } catch (err) {
-    res.status(500).end(err);
-  }
-});
+// Health & readiness
+app.get("/health", (req, res) => res.json({ status: "ok", timestamp: new Date().toISOString() }));
 
 // Basic health check
 app.get("/health", (req, res) => {
@@ -71,11 +60,7 @@ app.get("/health", (req, res) => {
  */
 
 app.get("/ready", async (req, res) => {
-  const checks: Record<string, string> = {
-    database: "down",
-    redis: "down",
-  };
-
+  const checks: Record<string, string> = { database: "down", redis: "down" };
   let allReady = true;
 
   try {
@@ -83,7 +68,6 @@ app.get("/ready", async (req, res) => {
     checks.database = "ok";
   } catch (err) {
     console.error("Database check failed", err);
-    checks.database = "error";
     allReady = false;
   }
 
@@ -97,17 +81,14 @@ app.get("/ready", async (req, res) => {
     }
   } catch (err) {
     console.error("Redis check failed", err);
-    checks.redis = "error";
     allReady = false;
   }
 
-  const response = {
+  res.status(allReady ? 200 : 503).json({
     status: allReady ? "ready" : "not ready",
     checks,
     timestamp: new Date().toISOString(),
-  };
-
-  res.status(allReady ? 200 : 503).json(response);
+  });
 });
 
 // Timeout middleware
@@ -120,32 +101,28 @@ app.use("/api/transactions", transactionDisputeRoutes);
 app.use("/api/transactions/bulk", bulkRoutes);
 app.use("/api/disputes", disputeRoutes);
 
-// Queue health check
+// Queue endpoints
 app.get("/health/queue", getQueueHealth);
 app.post("/admin/queues/pause", pauseQueueEndpoint);
 app.post("/admin/queues/resume", resumeQueueEndpoint);
 
-// Timeout error handler (must be before general error handler)
+// Error handlers
 app.use(timeoutErrorHandler);
 app.use(errorHandler);
 
-// Init Redis
+// Redis init
 connectRedis()
-  .then(() => {
-    console.log("Redis initialized");
-  })
+  .then(() => console.log("Redis initialized"))
   .catch((err) => {
-    console.error("Failed to connect to Redis:", err);
-    console.warn("Distributed locks will not be available");
+    console.error("Redis failed", err);
+    console.warn("Distributed locks not available");
   });
 
-// Initialize queue dashboard
+// Queue dashboard
 const queueRouter = createQueueDashboard();
 app.use("/admin/queues", queueRouter);
 
-app.listen(PORT, () => {
-  console.log(`Server running on port ${PORT}`);
-  console.log(`Rate limit: ${RATE_LIMIT_MAX_REQUESTS} requests per ${RATE_LIMIT_WINDOW_MS / 1000}s`);
-});
+// Start server
+app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
 
 export default app;

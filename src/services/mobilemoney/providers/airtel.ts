@@ -1,6 +1,6 @@
 import axios, { AxiosInstance } from "axios";
 
-export class AirtelService {
+export class AirtelProvider {
   private client: AxiosInstance;
   private token: string | null = null;
   private tokenExpiry: number = 0;
@@ -12,11 +12,6 @@ export class AirtelService {
     });
   }
 
-  /**
-   * =========================
-   * AUTHENTICATION
-   * =========================
-   */
   private async authenticate(): Promise<string> {
     if (this.token && Date.now() < this.tokenExpiry) {
       return this.token;
@@ -67,11 +62,10 @@ export class AirtelService {
           continue;
         }
 
-        throw err;
-      }
-    }
+    this.token = response.data.access_token;
+    this.tokenExpiry = Date.now() + response.data.expires_in * 1000;
 
-    throw lastError;
+    return this.token!;
   }
 
   /**
@@ -137,8 +131,7 @@ export class AirtelService {
         }
       );
 
-      return response.data;
-    });
+    return { success: true, data: response.data };
   }
 
   /**
