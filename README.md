@@ -12,6 +12,9 @@ A backend service that bridges mobile money providers (MTN, Airtel, Orange) with
 - Stellar blockchain integration
 - RESTful API and GraphQL (`/graphql`)
 - PostgreSQL database
+- Redis (for queues and locking)
+- Background processing (BullMQ)
+- Email notifications (Nodemailer)
 - Docker support
 - TypeScript
 
@@ -241,6 +244,18 @@ git commit -m "Your message" --no-verify
 - `POST /api/transactions/withdraw` - Withdraw from Stellar to mobile money
 - `GET /api/transactions/:id` - Get transaction status
 
+#### Transaction Idempotency
+
+Send an `Idempotency-Key` header on `POST /api/transactions/deposit` and
+`POST /api/transactions/withdraw` when the client may retry the same request.
+
+- duplicate requests with the same active key return the existing transaction
+  with HTTP `200`
+- keys remain active for `24` hours by default
+- expired keys are cleared during cleanup so they can be reused safely later
+- race conditions are still protected by the database unique index on
+  `transactions.idempotency_key`
+
 ### Statistics & Metrics
 
 - `GET /api/stats` - Get system-wide statistics (Total transactions, success rate, total volume, active users, and volume by provider).
@@ -285,7 +300,7 @@ Allows users to view their transaction history with built-in pagination and date
 | `limit` | number | Number of transactions per page (Default: 10). |
 
 **Example Request:**
-`GET /api/transactions?startDate=2026-03-01&endDate=2026-03-31&page=1&limit=5`
+`GET /api/transactions?startDate=2026-03-01&endDate=2026-03-31&offset=0&limit=5`
 
 **Validation Rules:**
 
@@ -299,3 +314,19 @@ Contributions are welcome! Please feel free to submit a Pull Request.
 ## License
 
 MIT
+
+## Development seeds
+
+There is a small seed script to populate sample users and transactions for local development.
+
+Run (development only):
+
+```bash
+# Ensure you have a .env with DATABASE_URL and set NODE_ENV=development
+npm run seed
+```
+
+Notes:
+- Idempotent: repeated runs won't duplicate records (uses UPSERT / ON CONFLICT DO NOTHING).
+- Creates a few sample users and a mix of transactions (completed, pending, failed) across providers.
+- Intended for local/dev environments only; the script will exit if NODE_ENV !== development.

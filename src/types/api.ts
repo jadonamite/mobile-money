@@ -23,6 +23,23 @@ export interface CancelTransactionResponse {
 }
 
 // ---------------------------------------------------------------------------
+// Phone Number Search
+// ---------------------------------------------------------------------------
+
+export interface PhoneSearchPagination {
+  page: number;
+  limit: number;
+  total: number;
+  totalPages: number;
+}
+
+export interface PhoneSearchResponse {
+  success: boolean;
+  pagination: PhoneSearchPagination;
+  data: Transaction[];
+}
+
+// ---------------------------------------------------------------------------
 // Errors
 // ---------------------------------------------------------------------------
 

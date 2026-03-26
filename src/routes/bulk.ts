@@ -1,26 +1,3 @@
-/**
- * Bulk Transaction Import via CSV
- *
- * CSV Format:
- *   amount,phoneNumber,provider,stellarAddress
- *   10000,+237670000000,MTN,GABC...XYZ
- *
- * Fields:
- *   - amount        : Positive number (e.g. 10000)
- *   - phoneNumber   : E.164 format phone number (e.g. +237670000000)
- *   - provider      : One of MTN, AIRTEL, ORANGE (case-insensitive)
- *   - stellarAddress: 56-character Stellar public key starting with G
- *
- * Endpoints:
- *   POST /api/transactions/bulk
- *     Accepts multipart/form-data with field name "file" (CSV, max 10 MB).
- *     Validates all rows first — returns 422 with validation errors if any fail.
- *     On success starts async processing and returns a jobId (HTTP 202).
- *
- *   GET /api/transactions/bulk/:jobId
- *     Returns current status of the bulk import job.
- */
-
 import { Router, Request, Response, NextFunction } from "express";
 import multer, { MulterError } from "multer";
 import csvParser from "csv-parser";
@@ -28,10 +5,7 @@ import { Readable } from "stream";
 import { TransactionModel, TransactionStatus } from "../models/transaction";
 import { MobileMoneyService } from "../services/mobilemoney/mobileMoneyService";
 import { StellarService } from "../services/stellar/stellarService";
-
-// ---------------------------------------------------------------------------
-// Types
-// ---------------------------------------------------------------------------
+import { notifyTransactionWebhook, WebhookService } from "../services/webhook";
 
 interface CsvRow {
   amount: string;
@@ -60,19 +34,11 @@ export interface BulkJob {
   completedAt?: Date;
 }
 
-// ---------------------------------------------------------------------------
-// In-memory job store
-// ---------------------------------------------------------------------------
-
 const jobs = new Map<string, BulkJob>();
 
 export function getBulkImportJob(jobId: string): BulkJob | undefined {
   return jobs.get(jobId);
 }
-
-// ---------------------------------------------------------------------------
-// Validation
-// ---------------------------------------------------------------------------
 
 const SUPPORTED_PROVIDERS = ["MTN", "AIRTEL", "ORANGE"];
 const PHONE_REGEX = /^\+\d{7,15}$/;
@@ -80,7 +46,7 @@ const STELLAR_ADDRESS_REGEX = /^G[A-Z2-7]{55}$/;
 
 function validateRow(row: CsvRow, index: number): ValidationError[] {
   const errors: ValidationError[] = [];
-  const rowNum = index + 2; // +1 for 0-index, +1 for header row
+  const rowNum = index + 2;
 
   if (!row.amount || isNaN(Number(row.amount)) || Number(row.amount) <= 0) {
     errors.push({
@@ -124,10 +90,6 @@ function validateRow(row: CsvRow, index: number): ValidationError[] {
   return errors;
 }
 
-// ---------------------------------------------------------------------------
-// CSV parsing
-// ---------------------------------------------------------------------------
-
 function parseCsv(buffer: Buffer): Promise<CsvRow[]> {
   return new Promise((resolve, reject) => {
     const rows: CsvRow[] = [];
@@ -144,31 +106,33 @@ function parseCsv(buffer: Buffer): Promise<CsvRow[]> {
   });
 }
 
-// ---------------------------------------------------------------------------
-// Async job processor
-// ---------------------------------------------------------------------------
-
 async function processJob(jobId: string, rows: CsvRow[]): Promise<void> {
   const job = jobs.get(jobId);
-  if (!job) return;
+  if (!job) {
+    return;
+  }
 
   job.status = "processing";
 
   try {
     const transactionModel = new TransactionModel();
     const mobileMoneyService = new MobileMoneyService();
+    const webhookService = new WebhookService();
 
     let stellarService: StellarService | null = null;
     try {
       stellarService = new StellarService();
     } catch {
       console.warn(
-        "[BulkImport] StellarService unavailable — deposits will be skipped",
+        "[BulkImport] StellarService unavailable - deposits will be skipped",
       );
     }
 
     for (let i = 0; i < rows.length; i++) {
       const row = rows[i];
+      let transactionId: string | null = null;
+      let failedAlreadyHandled = false;
+
       try {
         const transaction = await transactionModel.create({
           type: "deposit",
@@ -179,33 +143,53 @@ async function processJob(jobId: string, rows: CsvRow[]): Promise<void> {
           status: TransactionStatus.Pending,
           tags: [],
         });
+        transactionId = transaction.id;
 
-        // initiatePayment throws on failure — only attempt Stellar if it succeeds
         await mobileMoneyService.initiatePayment(
           row.provider,
           row.phoneNumber,
           row.amount,
         );
 
-        if (stellarService) {
-          await stellarService.sendPayment(row.stellarAddress, row.amount);
-          await transactionModel.updateStatus(
-            transaction.id,
-            TransactionStatus.Completed,
-          );
-        } else {
+        if (!stellarService) {
           await transactionModel.updateStatus(
             transaction.id,
             TransactionStatus.Failed,
           );
-          throw new Error("StellarService unavailable — deposit not completed");
+          await notifyTransactionWebhook(transaction.id, "transaction.failed", {
+            transactionModel,
+            webhookService,
+          });
+          failedAlreadyHandled = true;
+          throw new Error("StellarService unavailable - deposit not completed");
         }
+
+        await stellarService.sendPayment(row.stellarAddress, row.amount);
+        await transactionModel.updateStatus(
+          transaction.id,
+          TransactionStatus.Completed,
+        );
+        await notifyTransactionWebhook(transaction.id, "transaction.completed", {
+          transactionModel,
+          webhookService,
+        });
 
         job.succeeded++;
       } catch (error) {
+        if (transactionId && !failedAlreadyHandled) {
+          await transactionModel.updateStatus(
+            transactionId,
+            TransactionStatus.Failed,
+          );
+          await notifyTransactionWebhook(transactionId, "transaction.failed", {
+            transactionModel,
+            webhookService,
+          });
+        }
+
         job.failed++;
         job.errors.push({
-          row: i + 2, // +1 for 0-index, +1 for header row
+          row: i + 2,
           error: error instanceof Error ? error.message : "Unknown error",
         });
       } finally {
@@ -220,10 +204,6 @@ async function processJob(jobId: string, rows: CsvRow[]): Promise<void> {
   }
 }
 
-// ---------------------------------------------------------------------------
-// Multer — memory storage, 10 MB limit, CSV only
-// ---------------------------------------------------------------------------
-
 const upload = multer({
   storage: multer.memoryStorage(),
   limits: { fileSize: 10 * 1024 * 1024 },
@@ -232,6 +212,7 @@ const upload = multer({
       file.mimetype === "text/csv" ||
       file.mimetype === "application/vnd.ms-excel" ||
       file.originalname.toLowerCase().endsWith(".csv");
+
     if (isCsv) {
       cb(null, true);
     } else {
@@ -240,20 +221,8 @@ const upload = multer({
   },
 });
 
-// ---------------------------------------------------------------------------
-// Router
-// ---------------------------------------------------------------------------
-
 export const bulkRoutes = Router();
 
-/**
- * POST /api/transactions/bulk
- *
- * Upload a CSV file to import transactions in bulk.
- * Accepts multipart/form-data with field "file".
- * All rows are validated before processing begins.
- * Processing happens asynchronously — poll the returned statusUrl for progress.
- */
 bulkRoutes.post(
   "/",
   upload.single("file"),
@@ -266,7 +235,6 @@ bulkRoutes.post(
       });
     }
 
-    // Parse CSV
     let rows: CsvRow[];
     try {
       rows = await parseCsv(req.file.buffer);
@@ -281,7 +249,6 @@ bulkRoutes.post(
       return res.status(400).json({ error: "CSV file contains no data rows" });
     }
 
-    // Validate all rows before processing
     const validationErrors: ValidationError[] = [];
     rows.forEach((row, index) => {
       validationErrors.push(...validateRow(row, index));
@@ -289,13 +256,12 @@ bulkRoutes.post(
 
     if (validationErrors.length > 0) {
       return res.status(422).json({
-        error: "CSV validation failed — no transactions were processed",
+        error: "CSV validation failed - no transactions were processed",
         totalErrors: validationErrors.length,
         validationErrors,
       });
     }
 
-    // Create job and kick off async processing
     const jobId = crypto.randomUUID();
     const job: BulkJob = {
       id: jobId,
@@ -313,39 +279,28 @@ bulkRoutes.post(
 
     return res.status(202).json({
       jobId,
-      message: `Bulk import queued — ${rows.length} transaction(s) will be processed`,
+      message: `Bulk import queued - ${rows.length} transaction(s) will be processed`,
       statusUrl: `/api/transactions/bulk/${jobId}`,
     });
   },
 );
 
-// Handle multer errors (file size, wrong type)
 bulkRoutes.use(
   (err: unknown, _req: Request, res: Response, next: NextFunction) => {
     if (err instanceof MulterError && err.code === "LIMIT_FILE_SIZE") {
       return res
         .status(413)
-        .json({ error: "File too large — maximum size is 10 MB" });
+        .json({ error: "File too large - maximum size is 10 MB" });
     }
+
     if (err instanceof Error) {
       return res.status(400).json({ error: err.message });
     }
+
     next(err);
   },
 );
 
-/**
- * GET /api/transactions/bulk/:jobId
- *
- * Poll the status of a bulk import job.
- *
- * Response fields:
- *   - status      : pending | processing | completed | failed
- *   - progress    : { total, processed, succeeded, failed }
- *   - errors      : per-row runtime errors encountered during processing
- *   - createdAt   : ISO timestamp
- *   - completedAt : ISO timestamp (only when status = "completed")
- */
 bulkRoutes.get("/:jobId", (req: Request, res: Response) => {
   const job = jobs.get(req.params.jobId);
 
