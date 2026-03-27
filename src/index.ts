@@ -1,11 +1,17 @@
+import "./tracer";
 import express, { NextFunction, Request, Response } from "express";
+import { IncomingMessage, Server } from "http";
 import cors from "cors";
 import helmet from "helmet";
 import rateLimit from "express-rate-limit";
 import compression from "compression";
 import dotenv from "dotenv";
+
+import spdy from "spdy";
+import fs from "fs";
+import path from "path";
 import session from "express-session";
-import { Server } from "http";
+import * as Sentry from "@sentry/node";
 
 import {
   apiVersionMiddleware,
@@ -28,6 +34,8 @@ import { contactsRoutes } from "./routes/contacts";
 import { reportsRoutes } from "./routes/reports";
 import { createKYCRoutes } from "./routes/kycRoutes";
 import { vaultRoutes } from "./routes/vaults";
+import { adminRoutes } from "./routes/admin";
+import { authRoutes } from "./routes/auth";
 import { errorHandler } from "./middleware/errorHandler";
 import {
   connectRedis,
@@ -44,6 +52,7 @@ import {
   haltOnTimedout,
   timeoutErrorHandler,
 } from "./middleware/timeout";
+import { requireAuth } from "./middleware/auth";
 import { responseTime } from "./middleware/responseTime";
 import { requestId } from "./middleware/requestId";
 import { metricsMiddleware } from "./middleware/metrics";
@@ -52,8 +61,14 @@ import { sessionAnomalyLogger } from "./services/logger";
 import { HealthCheckResponse, ReadinessCheckResponse } from "./types/api";
 import sep31Router from "./stellar/sep31";
 import sep24Router from "./stellar/sep24";
+import { createSep12Router } from "./stellar/sep12";
+import { initSentry, sentryBreadcrumbMiddleware } from "./middleware/sentry";
 
 dotenv.config();
+
+if (process.env.SENTRY_DSN) {
+  initSentry(process.env.SENTRY_DSN);
+}
 
 validateStellarNetwork();
 logStellarNetwork();
@@ -69,6 +84,10 @@ let isShuttingDown = false;
 let shutdownInProgress = false;
 let activeRequests = 0;
 
+if (process.env.SENTRY_DSN) {
+  Sentry.setupExpressErrorHandler(app);
+}
+
 const RATE_LIMIT_WINDOW_MS = parseInt(
   process.env.RATE_LIMIT_WINDOW_MS || "900000",
 );
@@ -83,10 +102,11 @@ const limiter = rateLimit({
   legacyHeaders: false,
 });
 
+app.use(sentryBreadcrumbMiddleware);
+
 app.use(metricsMiddleware);
 app.use(helmet());
 
-// Compression middleware
 if (process.env.COMPRESSION_ENABLED !== "false") {
   app.use(
     compression({
@@ -96,7 +116,6 @@ if (process.env.COMPRESSION_ENABLED !== "false") {
         if (req.headers["x-no-compression"]) {
           return false;
         }
-        // Don't compress already compressed content types
         const contentType = res.getHeader("content-type") as string;
         if (
           contentType &&
@@ -118,6 +137,9 @@ app.use(cors(createCorsOptions()));
 app.use(
   express.json({
     limit: process.env.REQUEST_SIZE_LIMIT || "10mb",
+    verify: (req: IncomingMessage, _res, buf) => {
+      (req as IncomingMessage & { rawBody?: Buffer }).rawBody = buf;
+    },
   }),
 );
 app.use(
@@ -156,7 +178,6 @@ app.use((req: Request, res: Response, next: NextFunction) => {
   next();
 });
 
-// Session configuration with Redis store
 const sessionSecret =
   process.env.SESSION_SECRET || "default-secret-change-in-production";
 const redisStore = createRedisStore();
@@ -231,6 +252,7 @@ app.use(haltOnTimedout);
 app.use(apiVersionMiddleware);
 app.use(validateVersionMiddleware);
 app.use("/oauth", createOAuthRouter());
+app.use("/api/auth", authRoutes);
 
 app.use("/api/v1/transactions", transactionRoutesV1);
 app.use("/api/v1/transactions", transactionDisputeRoutesV1);
@@ -263,10 +285,10 @@ app.use("/api/stats", statsRoutes);
 app.use("/api/contacts", contactsRoutes);
 app.use("/api/reports", reportsRoutes);
 app.use("/api/kyc", createKYCRoutes(pool));
+app.use("/api/admin", requireAuth, adminRoutes);
 app.use("/sep31", sep31Router);
-
-// SEP-24 Interactive Deposit/Withdrawal Flow
 app.use("/sep24", sep24Router);
+app.use("/sep12", createSep12Router(pool));
 
 app.use(
   (
@@ -285,6 +307,10 @@ app.use(
     next(err);
   },
 );
+
+if (process.env.SENTRY_DSN) {
+  app.use(Sentry.expressErrorHandler());
+}
 
 app.use(timeoutErrorHandler);
 app.use(errorHandler);
@@ -399,7 +425,24 @@ async function initializeRuntime(): Promise<void> {
   const { createQueueDashboard } = await import("./queue/dashboard");
   app.use("/admin/queues", createQueueDashboard());
 
-  server = app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
+  const useHTTP2 = process.env.USE_HTTP2 === "true";
+
+  if (useHTTP2) {
+    const sslOptions = {
+      key: fs.readFileSync(path.join(__dirname, "../certs/key.pem")),
+      cert: fs.readFileSync(path.join(__dirname, "../certs/cert.pem")),
+    };
+
+    const http2Server = spdy.createServer(sslOptions, app);
+    http2Server.listen(PORT, () => {
+      console.log(`HTTP/2 server running on https://localhost:${PORT}`);
+    });
+    server = http2Server as unknown as Server;
+  } else {
+    server = app.listen(PORT, () =>
+      console.log(`HTTP/1.1 server running on http://localhost:${PORT}`),
+    );
+  }
 }
 
 if (process.env.NODE_ENV !== "test") {
