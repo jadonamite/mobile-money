@@ -373,6 +373,9 @@ git commit -m "Your message" --no-verify
 
 ## API Endpoints
 
+## System Architecture
+See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)
+
 ### Health Checks
 
 - `GET /health` - Service health status (liveness)
