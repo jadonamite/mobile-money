@@ -1,4 +1,5 @@
 import express, { NextFunction, Request, Response } from "express";
+import { IncomingMessage } from "http";
 import cors from "cors";
 import helmet from "helmet";
 import rateLimit from "express-rate-limit";
@@ -48,11 +49,11 @@ import { responseTime } from "./middleware/responseTime";
 import { requestId } from "./middleware/requestId";
 import { metricsMiddleware } from "./middleware/metrics";
 import { validateStellarNetwork, logStellarNetwork } from "./config/stellar";
-import { criticalErrorNotifier, sessionAnomalyLogger } from "./services/loggers";
+import { sessionAnomalyLogger } from "./services/logger";
 import { HealthCheckResponse, ReadinessCheckResponse } from "./types/api";
 import sep31Router from "./stellar/sep31";
 import sep24Router from "./stellar/sep24";
-import { createSep12Router } from "./stellar/sep12";
+import stellarWebhookRouter from "./stellar/webhooks";
 
 dotenv.config();
 
@@ -111,6 +112,9 @@ app.use(cors(createCorsOptions()));
 app.use(
   express.json({
     limit: process.env.REQUEST_SIZE_LIMIT || "10mb",
+    verify: (req: IncomingMessage, _res, buf) => {
+      (req as IncomingMessage & { rawBody?: Buffer }).rawBody = buf;
+    },
   }),
 );
 app.use(
@@ -122,7 +126,6 @@ app.use(
 app.use(limiter);
 app.use(responseTime);
 app.use(requestId);
-app.use(criticalErrorNotifier());
 
 // Session configuration with Redis store
 const sessionSecret =
@@ -225,8 +228,10 @@ app.use("/api/reports", reportsRoutes);
 app.use("/api/kyc", createKYCRoutes(pool));
 app.use("/api/admin", requireAuth, adminRoutes);
 app.use("/sep31", sep31Router);
+app.use("/stellar", stellarWebhookRouter);
+
+// SEP-24 Interactive Deposit/Withdrawal Flow
 app.use("/sep24", sep24Router);
-app.use("/sep12", createSep12Router(pool));
 
 app.use(
   (

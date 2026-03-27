@@ -14,6 +14,8 @@ A backend service that bridges mobile money providers (MTN, Airtel, Orange) with
 - PostgreSQL database
 - Redis (for queues and locking)
 - Background processing (BullMQ)
+- Email notifications (Nodemailer)
+- **No-code webhook integration (Zapier/Make.com)**
 - Email notifications (SendGrid)
 - Docker support
 - TypeScript
