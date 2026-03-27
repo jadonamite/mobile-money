@@ -71,3 +71,9 @@ ADD COLUMN IF NOT EXISTS webhook_delivered_at TIMESTAMP;
 
 ALTER TABLE transactions
 ADD COLUMN IF NOT EXISTS webhook_last_error TEXT;
+
+-- Add vault_id to link transactions to vaults for vault-related transfers
+ALTER TABLE transactions 
+ADD COLUMN IF NOT EXISTS vault_id UUID REFERENCES vaults(id);
+
+CREATE INDEX IF NOT EXISTS idx_transactions_vault_id ON transactions(vault_id);

@@ -168,4 +168,7 @@ export const LockKeys = {
   stellarAccount: (address: string) => `stellar:${address}`,
   provider: (provider: string, phone: string) =>
     `provider:${provider}:${phone}`,
+  vault: (vaultId: string) => `vault:${vaultId}`,
+  userVaults: (userId: string) => `user-vaults:${userId}`,
+  vaultTransfer: (userId: string, vaultId: string) => `vault-transfer:${userId}:${vaultId}`,
 };
