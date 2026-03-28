@@ -417,6 +417,12 @@ async function initializeRuntime(): Promise<void> {
   try {
     await connectRedis();
     console.log("Redis initialized");
+
+    const { startProviderBalanceAlertWorker, scheduleProviderBalanceAlertJob } =
+      await import("./queue");
+    startProviderBalanceAlertWorker();
+    await scheduleProviderBalanceAlertJob();
+    console.log("Provider balance alert queue initialized");
   } catch (err) {
     console.error("Redis failed", err);
     console.warn("Distributed locks not available");

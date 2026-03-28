@@ -2,6 +2,7 @@ import { ExpressAdapter } from "@bull-board/express";
 import { createBullBoard } from "@bull-board/api";
 import { BullMQAdapter } from "@bull-board/api/dist/queueAdapters/bullMQ";
 import { transactionQueue } from "./transactionQueue";
+import { providerBalanceAlertQueue } from "./providerBalanceAlertQueue";
 
 const createQueueAdapter = () => {
   return new BullMQAdapter(transactionQueue, {
@@ -13,7 +14,12 @@ export function createQueueDashboard() {
   const serverAdapter = new ExpressAdapter();
 
   createBullBoard({
-    queues: [createQueueAdapter()],
+    queues: [
+      createQueueAdapter(),
+      new BullMQAdapter(providerBalanceAlertQueue, {
+        readOnlyMode: false,
+      }),
+    ],
     serverAdapter: serverAdapter,
     options: {
       uiConfig: {
