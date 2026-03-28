@@ -57,6 +57,7 @@ import { metricsMiddleware } from "./middleware/metrics";
 import { validateStellarNetwork, logStellarNetwork } from "./config/stellar";
 import { sessionAnomalyLogger } from "./services/logger";
 import { HealthCheckResponse, ReadinessCheckResponse } from "./types/api";
+import { privacyRoutes } from "./routes/privacy";
 import sep31Router from "./stellar/sep31";
 import sep24Router from "./stellar/sep24";
 import { createSep12Router } from "./stellar/sep12";
@@ -237,6 +238,9 @@ app.use("/api/stats", statsRoutes);
 app.use("/api/contacts", contactsRoutes);
 app.use("/api/reports", reportsRoutes);
 app.use("/api/kyc", createKYCRoutes(pool));
+
+// GDPR
+app.use("/api/gdpr", privacyRoutes);
 app.use("/api/admin", requireAuth, adminRoutes);
 app.use("/sep10", createSep10Router());
 app.use("/sep31", sep31Router);
@@ -314,5 +318,6 @@ async function initializeRuntime(): Promise<void> {
 if (process.env.NODE_ENV !== "test") {
   void initializeRuntime();
 }
+
 
 export default app;
