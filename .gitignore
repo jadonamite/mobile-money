@@ -25,3 +25,6 @@ yarn.lock
 certs/
 .env
 .env
+
+# Load test output
+tests/load/results/*.json
