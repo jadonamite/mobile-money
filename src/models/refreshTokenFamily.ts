@@ -126,7 +126,7 @@ export class RefreshTokenFamilyModel {
     }
   }
 
-  async revokeAll(userId: string) {
+  async revokeAll(userId: string, familyId:string) {
     const client = await pool.connect();
 
     try {
@@ -135,11 +135,11 @@ export class RefreshTokenFamilyModel {
       // Update DB
       const tokenResult = await pool.query(
         `DELETE FROM refresh_token_families 
-        WHERE user_id = $1`,
-        [userId],
+        WHERE user_id = $1 AND family_id = $2`,
+        [userId, familyId],
       );
 
-      await pool.query("COMMIT");
+      await client.query("COMMIT");
 
       return {
         data: {
