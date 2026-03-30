@@ -49,14 +49,16 @@ export class RefreshTokenFamilyModel {
     return result.rows[0];
   }
 
-  async revokeFamily(familyId: string, userId: string) {
+  async revokeFamily(familyId: string, userId: string, tokenId: string) {
     const client = await pool.connect();
 
     try {
+      await client.query("BEGIN");
+
       const result = await client.query(
         `SELECT family_id FROM refresh_token_families
-               WHERE id = $1 AND user_id = $2`,
-        [familyId, userId],
+               WHERE id = $1 AND user_id = $2 AND family_id=$3`,
+        [tokenId, userId, familyId],
       );
 
       if (result.rows.length === 0) {
@@ -65,21 +67,19 @@ export class RefreshTokenFamilyModel {
 
       const { family_id } = result.rows[0];
 
-      await client.query("BEGIN");
-
       // Delete
       const deleteResult = await client.query(
         `DELETE FROM refresh_token_families
-         WHERE family_id = $1 AND user_id = $2`,
-        [familyId, userId],
+         WHERE id=$1 AND family_id=$2 AND user_id=$3`,
+        [tokenId, familyId, userId],
       );
 
-      await pool.query("COMMIT");
+      await client.query("COMMIT");
 
       return {
         data: {
           familyId: family_id,
-          deleteResult: deleteResult.rowCount
+          deleteResult: deleteResult.rowCount,
         },
       };
     } catch (err: any) {
