@@ -54,7 +54,7 @@ const extractLegacyDetails = (err: AppError): Record<string, unknown> => {
     return err.details;
   }
 
-  const details = Object.entries(err as Record<string, unknown>).reduce(
+  const details = Object.entries(err as unknown as Record<string, unknown>).reduce(
     (acc, [key, value]) => {
       if (!RESERVED_ERROR_FIELDS.has(key) && value !== undefined) {
         acc[key] = value;
